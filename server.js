@@ -1,22 +1,50 @@
 /**
- * Wormup Sync Server - Enhanced Version
- * خادم مزامنة محسن مع ميزات إضافية
+ * Wormup Sync Server - بدون مكتبة CORS
+ * إعداد CORS يدوي مدمج
  */
 
 const express = require('express');
 const { createServer } = require('http');
 const { Server } = require('socket.io');
-const cors = require('cors');
 
 const app = express();
 const server = createServer(app);
 
-// إعداد Socket.IO مع CORS شامل
+// إعداد CORS يدوياً بدون مكتبة خارجية
+const allowedOrigins = [
+    'https://wormate.io',
+    'https://www.wormate.io',
+    'http://wormate.io',
+    'http://www.wormate.io',
+    'https://wormup.in',
+    'http://wormup.in',
+    'http://localhost:3000',
+    'https://localhost:3000'
+];
+
+// إعداد Socket.IO مع CORS يدوي
 const io = new Server(server, {
     cors: {
-        origin: "*",
-        methods: ["GET", "POST"],
-        credentials: false
+        origin: function(origin, callback) {
+            // السماح لجميع الطلبات إذا لم يكن هناك origin (مثل mobile apps)
+            if (!origin) return callback(null, true);
+            
+            // فحص إذا كان المصدر مسموحاً
+            if (allowedOrigins.includes(origin) || origin.includes('wormate') || origin.includes('wormup')) {
+                return callback(null, true);
+            }
+            
+            // السماح لجميع localhost
+            if (origin.includes('localhost') || origin.includes('127.0.0.1')) {
+                return callback(null, true);
+            }
+            
+            // إذا لم يكن مسموحاً، ارفض
+            return callback(new Error('Not allowed by CORS'), false);
+        },
+        methods: ['GET', 'POST'],
+        allowedHeaders: ['Content-Type', 'Authorization'],
+        credentials: true
     },
     transports: ['websocket', 'polling'],
     allowEIO3: true,
@@ -24,12 +52,48 @@ const io = new Server(server, {
     pingInterval: 25000
 });
 
-// إعداد Express
-app.use(cors({ origin: '*' }));
+// إعداد Express middleware يدوياً
 app.use(express.json());
 
-// فئة إدارة المزامنة المحسنة
-class EnhancedWormupSyncManager {
+// إعداد CORS headers يدوياً لجميع طلبات HTTP
+app.use((req, res, next) => {
+    const origin = req.headers.origin;
+    
+    // فحص المصدر وإعداد headers
+    if (!origin) {
+        // لا يوجد origin - طلب مباشر
+        res.setHeader('Access-Control-Allow-Origin', '*');
+    } else if (allowedOrigins.includes(origin)) {
+        // مصدر مسموح
+        res.setHeader('Access-Control-Allow-Origin', origin);
+    } else if (origin.includes('wormate') || origin.includes('wormup')) {
+        // مصدر يحتوي على wormate أو wormup
+        res.setHeader('Access-Control-Allow-Origin', origin);
+    } else if (origin.includes('localhost') || origin.includes('127.0.0.1')) {
+        // localhost للتطوير
+        res.setHeader('Access-Control-Allow-Origin', origin);
+    } else {
+        // مصدر غير مسموح - لكن لا نرفض لتجنب الأخطاء
+        res.setHeader('Access-Control-Allow-Origin', '*');
+    }
+    
+    // إعداد باقي CORS headers
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, HEAD');
+    res.setHeader('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization, Cache-Control, Pragma');
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+    res.setHeader('Access-Control-Max-Age', '86400'); // 24 ساعة
+    
+    // استجابة فورية لطلبات OPTIONS
+    if (req.method === 'OPTIONS') {
+        res.status(204).send();
+        return;
+    }
+    
+    next();
+});
+
+// فئة إدارة المزامنة
+class WormupSyncManager {
     constructor() {
         this.rooms = new Map();
         this.players = new Map();
@@ -40,19 +104,16 @@ class EnhancedWormupSyncManager {
             skinUpdates: 0,
             hatUpdates: 0,
             roomsCreated: 0,
+            corsRequests: 0,
             startTime: Date.now()
         };
         
-        // تنظيف دوري كل 5 دقائق
         setInterval(() => this.cleanup(), 300000);
-        
-        // طباعة إحصائيات كل 10 دقائق
         setInterval(() => this.printStats(), 600000);
         
-        console.log('🚀 Enhanced Wormup Sync Manager initialized');
+        console.log('🚀 Wormup Sync Manager initialized with manual CORS');
     }
     
-    // إضافة لاعب للغرفة
     addPlayer(socket, data) {
         const { wuid, roomId, playerInfo } = data;
         
@@ -65,11 +126,10 @@ class EnhancedWormupSyncManager {
             return;
         }
         
-        // التحقق من أن اللاعب ليس موجوداً بالفعل
+        // إزالة اللاعب القديم إذا وجد
         if (this.players.has(wuid)) {
             const existingPlayer = this.players.get(wuid);
             if (existingPlayer.socket.connected) {
-                // قطع الاتصال القديم
                 existingPlayer.socket.disconnect();
                 console.log(`🔄 Replaced existing connection for ${wuid}`);
             }
@@ -80,29 +140,24 @@ class EnhancedWormupSyncManager {
             this.rooms.set(roomId, { 
                 players: new Set(), 
                 createdAt: Date.now(),
-                lastActivity: Date.now(),
-                messageCount: 0
+                lastActivity: Date.now()
             });
             this.stats.roomsCreated++;
             console.log(`🏠 Created room: ${roomId}`);
         }
         
-        // إضافة اللاعب للغرفة
         const room = this.rooms.get(roomId);
         room.players.add(wuid);
         room.lastActivity = Date.now();
         
-        // حفظ معلومات اللاعب
         this.players.set(wuid, {
             socket: socket,
             roomId: roomId,
             playerInfo: playerInfo || {},
             joinTime: Date.now(),
-            lastActivity: Date.now(),
-            messagesSent: 0
+            lastActivity: Date.now()
         });
         
-        // ربط معلومات Socket
         socket.wuid = wuid;
         socket.roomId = roomId;
         socket.join(roomId);
@@ -111,32 +166,22 @@ class EnhancedWormupSyncManager {
         
         console.log(`👤 Player ${wuid} (${playerInfo?.name || 'Unknown'}) joined room ${roomId}`);
         
-        // إخبار باقي اللاعبين في الغرفة
+        // إخبار باقي اللاعبين
         socket.to(roomId).emit('player_join', {
             wuid: wuid,
             playerInfo: playerInfo,
             timestamp: Date.now()
         });
         
-        // إرسال تأكيد الانضمام مع معلومات الغرفة
-        const roomPlayers = Array.from(room.players).map(playerId => {
-            const player = this.players.get(playerId);
-            return {
-                wuid: playerId,
-                playerInfo: player?.playerInfo || {},
-                online: player?.socket?.connected || false
-            };
-        });
-        
+        // تأكيد الانضمام
         socket.emit('join_success', {
             roomId: roomId,
             playersInRoom: room.players.size,
-            players: roomPlayers,
-            serverTime: Date.now()
+            serverTime: Date.now(),
+            message: 'Successfully joined room with manual CORS'
         });
     }
     
-    // معالجة تحديث السكن
     handleSkinUpdate(socket, data) {
         const { wuid, roomId, skinId } = data;
         
@@ -146,14 +191,9 @@ class EnhancedWormupSyncManager {
         this.stats.totalMessages++;
         this.stats.skinUpdates++;
         
-        // تحديث stats الغرفة
-        if (this.rooms.has(roomId)) {
-            this.rooms.get(roomId).messageCount++;
-        }
-        
         console.log(`🎨 Skin update: ${wuid} -> ${skinId} in room ${roomId}`);
         
-        // إرسال للاعبين الآخرين في الغرفة
+        // إرسال للآخرين
         socket.to(roomId).emit('skin_update', {
             wuid: wuid,
             skinId: skinId,
@@ -168,7 +208,6 @@ class EnhancedWormupSyncManager {
         });
     }
     
-    // معالجة تحديث القبعة
     handleHatUpdate(socket, data) {
         const { wuid, roomId, hatId } = data;
         
@@ -178,14 +217,9 @@ class EnhancedWormupSyncManager {
         this.stats.totalMessages++;
         this.stats.hatUpdates++;
         
-        // تحديث stats الغرفة
-        if (this.rooms.has(roomId)) {
-            this.rooms.get(roomId).messageCount++;
-        }
-        
         console.log(`🎩 Hat update: ${wuid} -> ${hatId} in room ${roomId}`);
         
-        // إرسال للاعبين الآخرين في الغرفة
+        // إرسال للآخرين
         socket.to(roomId).emit('hat_update', {
             wuid: wuid,
             hatId: hatId,
@@ -200,112 +234,34 @@ class EnhancedWormupSyncManager {
         });
     }
     
-    // معالجة تحديث شامل للمظهر (جديد)
-    handleAppearanceUpdate(socket, data) {
-        const { wuid, roomId, skinId, hatId, eyesId } = data;
-        
-        if (!this.validatePlayer(socket, wuid, roomId)) return;
-        
-        this.updatePlayerActivity(wuid);
-        this.stats.totalMessages++;
-        
-        console.log(`🎭 Full appearance update: ${wuid} in room ${roomId}`);
-        
-        // إرسال للاعبين الآخرين في الغرفة
-        socket.to(roomId).emit('appearance_update', {
-            wuid: wuid,
-            skinId: skinId,
-            hatId: hatId,
-            eyesId: eyesId,
-            timestamp: Date.now()
-        });
-        
-        // تأكيد للمرسل
-        socket.emit('update_confirmed', {
-            type: 'appearance',
-            skinId: skinId,
-            hatId: hatId,
-            eyesId: eyesId,
-            timestamp: Date.now()
-        });
-    }
-    
-    // معالجة heartbeat محسنة
     handleHeartbeat(socket, data) {
         const { wuid } = data;
         
         if (wuid && this.players.has(wuid)) {
             this.updatePlayerActivity(wuid);
-            
-            // إرسال معلومات إضافية مع pong
-            const player = this.players.get(wuid);
-            const room = this.rooms.get(player.roomId);
-            
             socket.emit('pong', { 
                 timestamp: Date.now(),
-                playersInRoom: room?.players.size || 0,
-                serverUptime: Date.now() - this.stats.startTime
+                status: 'alive'
             });
         }
     }
     
-    // طلب قائمة اللاعبين في الغرفة (جديد)
-    handleGetRoomPlayers(socket, data) {
-        const { roomId } = data;
-        const wuid = socket.wuid;
-        
-        if (!wuid || !this.players.has(wuid)) {
-            socket.emit('error', { 
-                code: 'UNAUTHORIZED',
-                message: 'Player not registered'
-            });
-            return;
-        }
-        
-        if (!this.rooms.has(roomId)) {
-            socket.emit('room_players', { players: [] });
-            return;
-        }
-        
-        const room = this.rooms.get(roomId);
-        const players = Array.from(room.players).map(playerId => {
-            const player = this.players.get(playerId);
-            return {
-                wuid: playerId,
-                playerInfo: player?.playerInfo || {},
-                online: player?.socket?.connected || false,
-                lastActivity: player?.lastActivity || 0
-            };
-        });
-        
-        socket.emit('room_players', { 
-            roomId: roomId,
-            players: players,
-            timestamp: Date.now()
-        });
-    }
-    
-    // إزالة لاعب
     removePlayer(socket) {
         if (!socket.wuid) return;
         
         const wuid = socket.wuid;
         const roomId = socket.roomId;
         
-        // إزالة من البيانات
         this.players.delete(wuid);
         
-        // إزالة من الغرفة
         if (roomId && this.rooms.has(roomId)) {
             const room = this.rooms.get(roomId);
             room.players.delete(wuid);
             
-            // إزالة الغرفة إذا أصبحت فارغة
             if (room.players.size === 0) {
                 this.rooms.delete(roomId);
                 console.log(`🏠 Removed empty room: ${roomId}`);
             } else {
-                // إخبار باقي اللاعبين
                 socket.to(roomId).emit('player_leave', { 
                     wuid: wuid,
                     timestamp: Date.now()
@@ -317,7 +273,6 @@ class EnhancedWormupSyncManager {
         console.log(`👋 Player ${wuid} left`);
     }
     
-    // التحقق من صحة اللاعب
     validatePlayer(socket, wuid, roomId) {
         if (!wuid || !roomId) {
             socket.emit('error', { 
@@ -337,86 +292,54 @@ class EnhancedWormupSyncManager {
             return false;
         }
         
-        if (!this.rooms.has(roomId)) {
-            socket.emit('error', { 
-                code: 'ROOM_NOT_FOUND', 
-                message: 'Room not found',
-                timestamp: Date.now()
-            });
-            return false;
-        }
-        
-        // تحديث عداد الرسائل للاعب
-        const player = this.players.get(wuid);
-        player.messagesSent++;
-        
         return true;
     }
     
-    // تحديث نشاط اللاعب
     updatePlayerActivity(wuid) {
         if (this.players.has(wuid)) {
             this.players.get(wuid).lastActivity = Date.now();
         }
     }
     
-    // تنظيف الاتصالات المنقطعة
     cleanup() {
         const now = Date.now();
-        const timeout = 10 * 60 * 1000; // 10 دقائق
-        let cleanedPlayers = 0;
-        let cleanedRooms = 0;
+        const timeout = 10 * 60 * 1000;
+        let cleanedCount = 0;
         
         this.players.forEach((playerData, wuid) => {
             if (now - playerData.lastActivity > timeout || 
                 !playerData.socket.connected) {
-                
                 this.removePlayer(playerData.socket);
-                cleanedPlayers++;
+                cleanedCount++;
             }
         });
         
-        // تنظيف الغرف الفارغة القديمة
-        this.rooms.forEach((room, roomId) => {
-            if (room.players.size === 0 && 
-                now - room.lastActivity > timeout) {
-                this.rooms.delete(roomId);
-                cleanedRooms++;
-            }
-        });
-        
-        if (cleanedPlayers > 0 || cleanedRooms > 0) {
-            console.log(`🧹 Cleaned up ${cleanedPlayers} players and ${cleanedRooms} rooms`);
+        if (cleanedCount > 0) {
+            console.log(`🧹 Cleaned up ${cleanedCount} inactive connections`);
         }
     }
     
-    // طباعة إحصائيات دورية
     printStats() {
-        const stats = this.getStats();
         console.log('📊 Server Stats:', {
-            activeConnections: stats.activeConnections,
-            activeRooms: stats.activeRooms,
-            totalMessages: stats.totalMessages,
-            skinUpdates: stats.skinUpdates,
-            hatUpdates: stats.hatUpdates,
-            uptime: Math.round(stats.uptime / 1000 / 60) + ' minutes'
+            activeConnections: this.players.size,
+            activeRooms: this.rooms.size,
+            totalMessages: this.stats.totalMessages,
+            skinUpdates: this.stats.skinUpdates,
+            hatUpdates: this.stats.hatUpdates,
+            corsRequests: this.stats.corsRequests
         });
     }
     
-    // الحصول على إحصائيات محسنة
     getStats() {
         return {
             ...this.stats,
             activeConnections: this.players.size,
             activeRooms: this.rooms.size,
             uptime: Date.now() - this.stats.startTime,
-            averagePlayersPerRoom: this.rooms.size > 0 ? 
-                Array.from(this.rooms.values()).reduce((sum, room) => sum + room.players.size, 0) / this.rooms.size : 0,
             timestamp: Date.now()
         };
     }
     
-    // الحصول على معلومات الغرف المحسنة
     getRoomsInfo() {
         const roomsInfo = {};
         
@@ -426,18 +349,14 @@ class EnhancedWormupSyncManager {
                 return {
                     wuid: playerId,
                     playerInfo: player?.playerInfo || {},
-                    online: player?.socket?.connected || false,
-                    lastActivity: player?.lastActivity || 0,
-                    messagesSent: player?.messagesSent || 0
+                    online: player?.socket?.connected || false
                 };
             });
             
             roomsInfo[roomId] = {
                 playerCount: room.players.size,
                 players: players,
-                createdAt: room.createdAt,
-                lastActivity: room.lastActivity,
-                messageCount: room.messageCount || 0
+                createdAt: room.createdAt
             };
         });
         
@@ -445,25 +364,25 @@ class EnhancedWormupSyncManager {
     }
 }
 
-// إنشاء مدير المزامنة المحسن
-const syncManager = new EnhancedWormupSyncManager();
+const syncManager = new WormupSyncManager();
 
 // معالجة اتصالات Socket.IO
 io.on('connection', (socket) => {
     syncManager.stats.totalConnections++;
-    console.log(`🔌 New connection: ${socket.id} (Total: ${syncManager.stats.totalConnections})`);
+    const clientOrigin = socket.handshake.headers.origin || 'unknown';
+    console.log(`🔌 New connection: ${socket.id} from ${clientOrigin}`);
     
-    // رسالة ترحيب محسنة
+    // رسالة ترحيب
     socket.emit('welcome', {
-        message: 'Connected to Enhanced Wormup Sync Server',
+        message: 'Connected to Wormup Sync Server (Manual CORS)',
         serverId: process.env.RAILWAY_SERVICE_ID || 'railway',
-        version: '2.0.0',
-        features: ['skin_sync', 'hat_sync', 'appearance_sync', 'heartbeat', 'room_management'],
+        version: '2.2.0',
+        corsMode: 'manual',
         timestamp: Date.now()
     });
     
-    // معالجة الأحداث
     socket.on('join_room', (data) => {
+        console.log('📥 Join room request:', data);
         syncManager.addPlayer(socket, data);
     });
     
@@ -475,18 +394,8 @@ io.on('connection', (socket) => {
         syncManager.handleHatUpdate(socket, data);
     });
     
-    // حدث جديد للمظهر الشامل
-    socket.on('appearance_update', (data) => {
-        syncManager.handleAppearanceUpdate(socket, data);
-    });
-    
     socket.on('heartbeat', (data) => {
         syncManager.handleHeartbeat(socket, data);
-    });
-    
-    // حدث جديد للحصول على قائمة اللاعبين
-    socket.on('get_room_players', (data) => {
-        syncManager.handleGetRoomPlayers(socket, data);
     });
     
     socket.on('disconnect', (reason) => {
@@ -499,72 +408,46 @@ io.on('connection', (socket) => {
     });
 });
 
-// HTTP Routes محسنة
+// HTTP Routes
 app.get('/', (req, res) => {
+    syncManager.stats.corsRequests++;
     res.json({
-        service: 'Enhanced Wormup Sync Server',
-        version: '2.0.0',
+        service: 'Wormup Sync Server',
+        version: '2.2.0 (Manual CORS)',
         status: 'running',
         platform: 'Railway',
+        corsMode: 'manual',
         stats: syncManager.getStats(),
-        features: [
-            'Real-time skin synchronization',
-            'Real-time hat synchronization', 
-            'Full appearance synchronization',
-            'Room management',
-            'Player heartbeat monitoring',
-            'Automatic cleanup',
-            'Enhanced error handling'
-        ],
-        endpoints: {
-            websocket: 'wss://[your-railway-domain]',
-            stats: '/stats',
-            rooms: '/rooms',
-            health: '/health',
-            players: '/players'
-        },
         timestamp: new Date().toISOString()
     });
 });
 
 app.get('/stats', (req, res) => {
+    syncManager.stats.corsRequests++;
     res.json(syncManager.getStats());
 });
 
 app.get('/rooms', (req, res) => {
+    syncManager.stats.corsRequests++;
     res.json(syncManager.getRoomsInfo());
 });
 
 app.get('/health', (req, res) => {
-    const stats = syncManager.getStats();
-    const isHealthy = stats.activeConnections >= 0 && process.uptime() > 0;
-    
-    res.status(isHealthy ? 200 : 503).json({
-        status: isHealthy ? 'healthy' : 'unhealthy',
+    syncManager.stats.corsRequests++;
+    res.status(200).json({
+        status: 'healthy',
         uptime: process.uptime(),
         memory: process.memoryUsage(),
-        platform: 'Railway',
-        connections: stats.activeConnections,
-        rooms: stats.activeRooms,
+        corsMode: 'manual',
         timestamp: new Date().toISOString()
     });
 });
 
-// endpoint جديد لمعلومات اللاعبين
-app.get('/players', (req, res) => {
-    const players = Array.from(syncManager.players.entries()).map(([wuid, data]) => ({
-        wuid: wuid,
-        roomId: data.roomId,
-        playerInfo: data.playerInfo,
-        online: data.socket.connected,
-        joinTime: data.joinTime,
-        lastActivity: data.lastActivity,
-        messagesSent: data.messagesSent || 0
-    }));
-    
+// اختبار CORS
+app.get('/test-cors', (req, res) => {
     res.json({
-        totalPlayers: players.length,
-        players: players,
+        message: 'CORS test successful',
+        origin: req.headers.origin,
         timestamp: new Date().toISOString()
     });
 });
@@ -573,18 +456,10 @@ app.get('/players', (req, res) => {
 const PORT = process.env.PORT || 3000;
 
 server.listen(PORT, () => {
-    console.log(`🚀 Enhanced Wormup Sync Server running on port ${PORT}`);
-    console.log(`📡 Socket.IO server ready for connections`);
+    console.log(`🚀 Wormup Sync Server running on port ${PORT}`);
+    console.log(`📡 Socket.IO server ready with manual CORS`);
     console.log(`🌐 Platform: Railway`);
-    console.log(`✨ Version: 2.0.0 with enhanced features`);
-    
-    // عرض معلومات البيئة
-    if (process.env.RAILWAY_ENVIRONMENT) {
-        console.log(`🚂 Railway Environment: ${process.env.RAILWAY_ENVIRONMENT}`);
-    }
-    if (process.env.RAILWAY_SERVICE_ID) {
-        console.log(`🆔 Service ID: ${process.env.RAILWAY_SERVICE_ID}`);
-    }
+    console.log(`🔧 CORS mode: Manual (no external library)`);
 });
 
 // معالجة إشارات النظام
@@ -604,4 +479,4 @@ process.on('SIGINT', () => {
     });
 });
 
-console.log('🎮 Enhanced Wormup Sync Server initialized successfully!');
+console.log('🎮 Wormup Sync Server with manual CORS initialized!');
